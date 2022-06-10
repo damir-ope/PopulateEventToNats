@@ -136,7 +136,7 @@ public class NatsTransferState implements Supplier<JsonTransfer>, NatsConsumer {
                 .subjects(configuration.getSubjectName())
                 .storageType(StorageType.File)
                 .replicas(configuration.getNumberOfReplicas())
-                .maxMessagesPerSubject(Long.MAX_VALUE)
+                .maxMessagesPerSubject(-1)
                 .build();
         // Create the stream
         StreamInfo streamInfo = getStreamInfo(jsm, configuration.getStreamName(), false);

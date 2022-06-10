@@ -6,6 +6,7 @@ import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
 import io.nats.client.api.StreamInfo;
 import io.nats.client.impl.NatsMessage;
+import java.util.Random;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import picocli.CommandLine;
@@ -56,7 +57,11 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
             description = "custPartId for the Event")
     public Integer custPartId;
 
-    enum TestCases { createPartitionedStreams, deletePartitionedStreams, publishPartitionedStreams  }
+    @CommandLine.Option(names = { "-rootCustomerId", "--rootCustId" }, paramLabel = "rootCustId",
+        description = "RootCustomerId or subscribe number in most cases, used to create event for particular customer")
+    public String rootCustomerId;
+
+    enum TestCases { createPartitionedStreams, deletePartitionedStreams, publishPartitionedStreams, createSingleEventsStream, publishMessagesToSingleEventsStream }
     @CommandLine.Option(names = { "-tst", "--testName" }, required = true, paramLabel = "TestNameToExecute",
             description = "Test to execute must be one of these values: ${COMPLETION-CANDIDATES}")
     TestCases tstName = null;
@@ -329,7 +334,7 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
                 .subjects(configuration.getSubjectName())
                 .storageType(StorageType.File)
                 .replicas(configuration.getNumberOfReplicas())
-                .maxMessagesPerSubject(Long.MAX_VALUE)
+                .maxMessagesPerSubject(-1)
                 .build();
         // Create the stream
         StreamInfo streamInfo = getStreamInfo(jsm, configuration.getStreamName(), false);
@@ -391,7 +396,7 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
                         .subjects(subjectName)
                         .storageType(StorageType.File)
                         .replicas(configuration.getNumberOfReplicas())
-                        .maxMessagesPerSubject(Long.MAX_VALUE)
+                        .maxMessagesPerSubject(-1)
                         .build();
                 // Create the stream
                 // StreamInfo streamInfo = getStreamInfo(jsm, streamName, false);
@@ -467,7 +472,7 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
                     .subjects(subjectName)
                     .storageType(StorageType.File)
                     .replicas(configuration.getNumberOfReplicas())
-                    .maxMessagesPerSubject(Long.MAX_VALUE)
+                    .maxMessagesPerSubject(-1)
                     .build();
             // Create the stream
             StreamInfo streamInfo = getStreamInfo(jsm, streamName, false);
@@ -514,12 +519,14 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
         Date now = java.util.Calendar.getInstance().getTime();
 
         for (int partition = 0; partition < numberPartitions; partition++){
+            int randomNineDigitNum = new Random().nextInt(385999999 + 385000000) + 385000000;
+
             JsonEvent event  = new JsonEvent().withTimeId(timeId)
                     .withUseId(useId)
                     .withEventId(22)
                     .withAccessKey("accessKey")
                     .withOwningCustomerID("owningCustomerID")
-                    .withRootCustomerID("rootCustomerID")
+                    .withRootCustomerID(String.valueOf(randomNineDigitNum))
                     .withEventType(112)
                     .withOriginalEventTime(now)
                     .withCreationEventTime(now)
@@ -528,13 +535,13 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
                     .withBillPeriodID(98)
                     .withRateEventType("rateEventType")
                     .withRootCustomerIDHash(partition);
-            String subject = Integer.toString(partition) + "." + Integer.toString(timeId) + "." + useId;
+            String subject = partition + "." + timeId + "." + useId + "." + randomNineDigitNum;
             /**
              * publish numMsgsPerPartition for this partition
              */
             publish(event, numMsgsPerPartition, subject);
             System.out.println("Published "+numMsgsPerPartition +" events to NATS  subject: "+ subject+
-                    " for useId "+useId + " and timeId "+timeId+ " and custIdHash "+partition);
+                    " for useId "+useId + " and timeId "+timeId+ " and custIdHash "+partition + "rootCustomerID " + randomNineDigitNum);
         }
 
         JsonTransfer transfer = new JsonTransfer(333,timeId, useId, now.getTime(),
@@ -568,19 +575,20 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
             commandLine.usage(System.out);
             return;
         }
-        logger.error("server :{}", reader.endpoint);
-        logger.error("number of partitions :{} ", reader.numPartitions);
-        logger.error("number of message to send to each partitions :{} ", reader.msgCount);
-        logger.error("timeId :{} useId :{} ", reader.timeId, reader.useId);
+        logger.info("server :{}", reader.endpoint);
+        logger.info("number of partitions :{} ", reader.numPartitions);
+        logger.info("number of message to send to each partitions :{} ", reader.msgCount);
+        logger.info("timeId :{} useId :{} ", reader.timeId, reader.useId);
+        logger.info("rootCustId :{} ", reader.rootCustomerId);
 
-        logger.error("Test to execute : {}", reader.tstName);
+        logger.info("Test to execute : {}", reader.tstName);
 
-        NatsReaderConfiguration config = new NatsReaderConfiguration(true, "Events.>",
+        NatsReaderConfiguration config = new NatsReaderConfiguration(true, "0.66.22",
                 null,
                 "PULL", true ,
                 reader.endpoint, "queueName",
                 "Events", "durableName",
-                1000, 3,  40, connectByteBufferSize,
+                1000, 1,  40, connectByteBufferSize,
                 initialMaxWaitTimeMs, maxWaitTimeMs);
         NatsReader natsReader = new NatsReader(config);
 
@@ -594,7 +602,72 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
             case publishPartitionedStreams:
                 natsReader.publishAllPartitions(reader.numPartitions, reader.msgCount, reader.useId, reader.timeId, reader.group);
                 break;
+            case createSingleEventsStream:
+                natsReader.createSingleEventsStream();
+                break;
+            case publishMessagesToSingleEventsStream:
+                natsReader.publishMessagesToSingleEventsStream(reader.msgCount, reader.useId,
+                    reader.rootCustomerId, reader.timeId);
         }
+    }
+
+    public void createSingleEventsStream()  {
+
+        Options options = new Options.Builder().
+            server(configuration.getUrl()).
+            connectionListener(new NatsConnectionListener(this)).
+            reconnectBufferSize(configuration.getConnectionByteBufferSize()).  // Set buffer in bytes
+                build();
+        try (Connection nc = Nats.connect(options)) {
+            JetStreamManagement jsm = nc.jetStreamManagement();
+        /*
+         * Perhaps we should drive this from the command line to build the
+         * stream up front using nats.cli.
+         */
+        StreamConfiguration streamConfig = StreamConfiguration.builder()
+            .name("Events")
+            .subjects("Events.>")
+            .storageType(StorageType.File)
+            .replicas(1)
+            .build();
+        // Create the stream if it does not exist
+        jsm.addStream(streamConfig);
+        nc.flush(Duration.ofSeconds(1));
+        } catch (IOException e) {
+            logger.error("I/O error",e);
+        } catch (InterruptedException | JetStreamApiException  e) {
+            logger.error("NATS Error ", e);
+        } catch (Exception e) {
+            logger.error("Error  ",e);
+        }
+    }
+
+    public void publishMessagesToSingleEventsStream(int numMsgsPerPartition, int useId, String rootCustomerId, int timeId) {
+        Date now = java.util.Calendar.getInstance().getTime();
+
+        int randomPartHash = new Random().nextInt(255 + 0) + 0;
+
+            JsonEvent event  = new JsonEvent().withTimeId(timeId)
+                .withUseId(useId)
+                .withEventId(22)
+                .withAccessKey("accessKey")
+                .withOwningCustomerID("owningCustomerID")
+                .withRootCustomerID(rootCustomerId)
+                .withEventType(112)
+                .withOriginalEventTime(now)
+                .withCreationEventTime(now)
+                .withEffectiveEventTime(now)
+                .withBillCycleID(1)
+                .withBillPeriodID(98)
+                .withRateEventType("rateEventType")
+                .withRootCustomerIDHash(randomPartHash);
+            String subject = "Events." + randomPartHash + "." + timeId + "." + useId + "." + rootCustomerId;
+            /**
+             * publish numMsgsPerPartition for this partition
+             */
+            publish(event, numMsgsPerPartition, subject);
+            System.out.println("Published "+numMsgsPerPartition +" events to NATS  subject: "+ subject+
+                " for useId "+useId + " and timeId "+timeId+ " and custIdHash "+randomPartHash +" and rootCustomerId "+ rootCustomerId);
     }
 
     @Override
