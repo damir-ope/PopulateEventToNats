@@ -6,6 +6,8 @@ import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
 import io.nats.client.api.StreamInfo;
 import io.nats.client.impl.NatsMessage;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Random;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -136,6 +138,59 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
 
         }
     }
+
+    public void publishJsonMsg(int numEvents, String subject) {
+        Options options = new Options.Builder().
+            server(configuration.getUrl()).
+            connectionListener(new NatsConnectionListener(this)).
+            reconnectBufferSize(configuration.getConnectionByteBufferSize()).  // Set buffer in bytes
+                build();
+        try (Connection nc = Nats.connect(options)) {
+            JetStream js = nc.jetStream();
+            for (int x = 0; x < numEvents; x++) {
+                Message msg = NatsMessage.builder()
+                    .subject(subject)
+                    .data(getEventWithRandomData())
+                    .build();
+                js.publish(msg);
+            }
+        } catch (IOException e) {
+            System.err.println("Error I/O ["+e.getLocalizedMessage());
+        } catch (InterruptedException | JetStreamApiException  e) {
+            System.err.println("Error  ["+e.getLocalizedMessage());
+        } catch (Exception e) {
+            System.err.println("Error  ["+e.getLocalizedMessage());
+
+        }
+    }
+
+    private byte[] getEventWithRandomData() {
+        Date now = java.util.Calendar.getInstance().getTime();
+
+        final int customerIdHash = computeRootCustomerIdHash(rootCustomerId);
+        JsonEvent event  = new JsonEvent().withTimeId(timeId)
+            .withUseId(useId)
+            .withEventId(new Random().nextInt())
+            .withAccessKey("0 " + rootCustomerId)
+            .withOwningCustomerID("owningCustomerID")
+            .withRootCustomerID(rootCustomerId)
+            .withEventType(112)
+            .withOriginalEventTime(now)
+            .withCreationEventTime(now)
+            .withEffectiveEventTime(now)
+            .withBillCycleID(1)
+            .withBillPeriodID(98)
+            .withRateEventType("rateEventType")
+            .withRootCustomerIDHash(customerIdHash);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try {
+            event.serialize(output);
+            return output.toByteArray();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public void publish(EventSerialization event, int numEvents, String subject) {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try {
@@ -643,31 +698,41 @@ public final class NatsReader implements Supplier<List<EventMessage>> , NatsCons
     }
 
     public void publishMessagesToSingleEventsStream(int numMsgsPerPartition, int useId, String rootCustomerId, int timeId) {
-        Date now = java.util.Calendar.getInstance().getTime();
+      String subject = "Events." + computeRootCustomerIdHash(rootCustomerId) + "." + timeId + "." + useId + "." + rootCustomerId;
+      this.rootCustomerId = rootCustomerId;
+      this.useId = useId;
+      this.numPartitions = numMsgsPerPartition;
+      this.timeId = timeId;
+      publishJsonMsg(numMsgsPerPartition, subject);
+    }
 
-        int randomPartHash = new Random().nextInt(255 + 0) + 0;
+    private int computeRootCustomerIdHash(String rootCustomerId) {
+        final MessageDigest md5;
+        try {
+            md5 = MessageDigest.getInstance("MD5");
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
+        md5.reset();
+        md5.update(rootCustomerId.concat(" ")
+            .getBytes());
+        byte[] result = md5.digest();
+        int res = 0;
 
-            JsonEvent event  = new JsonEvent().withTimeId(timeId)
-                .withUseId(useId)
-                .withEventId(22)
-                .withAccessKey("accessKey")
-                .withOwningCustomerID("owningCustomerID")
-                .withRootCustomerID(rootCustomerId)
-                .withEventType(112)
-                .withOriginalEventTime(now)
-                .withCreationEventTime(now)
-                .withEffectiveEventTime(now)
-                .withBillCycleID(1)
-                .withBillPeriodID(98)
-                .withRateEventType("rateEventType")
-                .withRootCustomerIDHash(randomPartHash);
-            String subject = "Events." + randomPartHash + "." + timeId + "." + useId + "." + rootCustomerId;
-            /**
-             * publish numMsgsPerPartition for this partition
-             */
-            publish(event, numMsgsPerPartition, subject);
-            System.out.println("Published "+numMsgsPerPartition +" events to NATS  subject: "+ subject+
-                " for useId "+useId + " and timeId "+timeId+ " and custIdHash "+randomPartHash +" and rootCustomerId "+ rootCustomerId);
+        for (int i = 7; i >= 0; i--) {
+            int d = (int) result[i];
+            if (d < 0) {
+                d = -d;
+            }
+
+            res += res * 256 + d;
+        }
+
+        if (res < 0) {
+            res = -res;
+        }
+
+        return (res % 256);
     }
 
     @Override
